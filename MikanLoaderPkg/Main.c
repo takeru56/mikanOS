@@ -2,11 +2,20 @@
 #include  <Library/UefiLib.h>
 #include  <Library/UefiBootServicesTableLib.h>
 #include  <Library/PrintLib.h>
+#include <Library/MemoryAllocationLib.h>
 #include  <Protocol/LoadedImage.h>
 #include  <Protocol/SimpleFileSystem.h>
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
+#include  <Guid/FileInfo.h>
 
+// ブートローダー
+// 起動時にUEFIアプリケーションとして呼ばれる
+// UEFIがディスク上を探してメモリ上に呼び出し実行する
+
+// 役割
+// メモリ上の状態を確認
+// カーネルをディスク上から呼び出してメモリ上に展開して実行
 
 struct MemoryMap {
     UINTN buffer_size;
@@ -120,8 +129,58 @@ EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL ** root)
     return EFI_SUCCESS;
 }
 
+EFI_STATUS OpenGOP(EFI_HANDLE image_handle, EFI_GRAPHICS_OUTPUT_PROTOCOL** gop)
+{
+    UINTN num_gop_handles = 0;
+    EFI_HANDLE* gop_handles = NULL;
+    // GOP機能を使用してピクセルを描画するのに必要な情報を取得する
+
+    gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiGraphicsOutputProtocolGuid,
+        NULL,
+        &num_gop_handles,
+        &gop_handles);
+
+    gBS->OpenProtocol(
+        gop_handles[0],
+        &gEfiGraphicsOutputProtocolGuid,
+        (VOID**)gop,
+        image_handle,
+        NULL,
+        EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+
+    FreePool(gop_handles);
+
+    return EFI_SUCCESS;
+}
+
+const CHAR16* GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt)
+{
+    switch (fmt) {
+        case PixelRedGreenBlueReserved8BitPerColor:
+            return L"PixelRedGreenBlueReserved8BitPerColor";
+        case PixelBlueGreenRedReserved8BitPerColor:
+            return L"PixelBlueGreenRedReserved8BitPerColor";
+        case PixelBitMask:
+            return L"PixelBitMask";
+        case PixelBltOnly:
+            return L"PixelBltOnly";
+        case PixelFormatMax:
+            return L"PixelFormatMax";
+        default:
+            return L"InvalidPixelFormat";
+    }
+}
+
+void Halt(void)
+{
+    while (1) __asm__("hlt");
+}
+
 EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
+    // *** メモリマップを取得する ***
     Print(L"Hello, Mikan World! Wow!\n");
     CHAR8 memmap_buf[4096*4];
     struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0, 0, 0, 0};
@@ -136,6 +195,87 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     // memmapをcsv形式でファイルに書き出す
     SaveMemoryMap(&memmap, memmap_file);
     memmap_file->Close(memmap_file);
+
+    // *** 画面を塗りつぶす ***
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
+    // gopに値をセットする
+    OpenGOP(image_handle, &gop);
+    Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
+        gop->Mode->Info->HorizontalResolution,
+        gop->Mode->Info->VerticalResolution,
+        GetPixelFormatUnicode(gop->Mode->Info->PixelFormat),
+        gop->Mode->Info->PixelsPerScanLine);
+    Print(L"Frame Buffer: 0x%0lx - 0x%0lx, Size: %lu bytes\n",
+        gop->Mode->FrameBufferBase,
+        gop->Mode->FrameBufferBase + gop->Mode->FrameBufferSize,
+        gop->Mode->FrameBufferSize);
+
+    UINT8* frame_buffer = (UINT8*)gop->Mode->FrameBufferBase;
+    for (UINTN i=0; i<gop->Mode->FrameBufferSize; ++i) {
+        frame_buffer[i] = 255;
+    }
+
+    // *** カーネルファイルをよびだす ***
+    EFI_FILE_PROTOCOL* kernel_file;
+    root_dir->Open(
+        root_dir,
+        &kernel_file,
+        L"\\kernel.elf",
+        EFI_FILE_MODE_READ,
+        0
+    );
+
+    // ファイル全体を読み込むためのメモリを確保するのに必要な処理．
+    // まずはkernelファイルの大きさを取得する
+    // https://github.com/tianocore/edk2/blob/0ecdcb6142037dd1cdd08660a2349960bcf0270a/MdePkg/Include/Guid/FileInfo.h
+    UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16) * 12;
+    UINT8 file_info_buffer[file_info_size];
+    kernel_file->GetInfo(
+        kernel_file, &gEfiFileInfoGuid, &file_info_size, file_info_buffer);
+
+    EFI_FILE_INFO* file_info = (EFI_FILE_INFO*) file_info_buffer;
+    UINTN kernel_file_size = file_info->FileSize;
+
+    EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;
+    EFI_STATUS status;
+    status = gBS->AllocatePages(
+        AllocateAddress, EfiLoaderData,
+        (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
+    if (EFI_ERROR(status)){
+        Print(L"failed to allocate Page: %r", status);
+        Halt();
+    }
+    kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+    Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
+
+    // カーネル起動前にブートサービスを停止する
+    // 停止
+    // memmap.map_keyは刻々と変わるので1回目の処理は失敗しがち
+    status = gBS->ExitBootServices(image_handle, memmap.map_key);
+    if (EFI_ERROR(status)) {
+        // memmapを取得してやり直す
+        // 直近のmemmapなら失敗しない
+        status = GetMemoryMap(&memmap);
+        if (EFI_ERROR(status)) {
+            // それでも失敗したら致命的なエラー．永久ループにより停止
+            Print(L"failed to get memory map: %r\n", status);
+            while(1);
+        }
+        status = gBS->ExitBootServices(image_handle, memmap.map_key);
+        if (EFI_ERROR(status)) {
+            Print(L"Could not exit boot service: %r\n", status);
+            while(1);
+        }
+    }
+
+    // *** カーネルの起動 ***
+    UINT64 entry_addr = *(UINT64*) (kernel_base_addr + 24);
+
+    // 関数の先頭アドレスと引数の型，返り値の型を組み合わせて，任意の場所から命令を実行できる
+    typedef void EntryPointType(UINT64, UINT64);
+    EntryPointType* entry_point = (EntryPointType*)entry_addr;
+    // 実行
+    entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);
 
     while(1);
     return EFI_SUCCESS;
