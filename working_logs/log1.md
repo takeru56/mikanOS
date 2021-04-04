@@ -1,6 +1,6 @@
 ・qemuの起動
 ```
-$ ../../osbook/devenv/run_qemu.sh ~/edk2/Build/MikanLoaderX64/DEBUG_CLANG38/X64/Loader.efi ./kernel.elf
+$ ~/osbook/devenv/run_qemu.sh ~/edk2/Build/MikanLoaderX64/DEBUG_CLANG38/X64/Loader.efi ./kernel.elf
 ```
 
 # day1
