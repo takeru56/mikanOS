@@ -52,3 +52,10 @@ fmt は[個数][フォーマット][サイズ]
 $ x /fmt addr
 ```
 ローダーからkernelをメモリ上に読み込み，実行する．
+
+
+# ToDo
+- USBドライバーのスクラッチ実装
+
+# day6
+PCIの詳細：http://archive.linux.or.jp/JF/JFdocs/The-Linux-Kernel-7.html
