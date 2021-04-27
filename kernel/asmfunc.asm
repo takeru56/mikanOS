@@ -20,3 +20,21 @@ IoIn32:
     mov dx, di      ; dx = addr
     in eax, dx       ; eaxにdxのアドレスから32bitを入力して返す
     ret
+
+global GetCS;
+GetCS:
+    xor eax, eax ; clear eax
+    mov ax, cs ; 現在のコードセグメントのセレクタ値
+    ret
+
+global LoadIDT
+LoadIDT:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 10
+    mov [rsp], di
+    mov [rsp+2], rsi
+    lidt [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret

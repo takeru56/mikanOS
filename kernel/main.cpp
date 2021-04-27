@@ -16,14 +16,14 @@
 #include "console.hpp"
 #include "pci.hpp"
 #include "logger.hpp"
+#include "queue.hpp"
 #include "usb/memory.hpp"
 #include "usb/device.hpp"
 #include "usb/classdriver/mouse.hpp"
 #include "usb/xhci/xhci.hpp"
 #include "usb/xhci/trb.hpp"
-
-void operator delete(void* obj) noexcept {
-}
+#include "interrupt.hpp"
+#include "asmfunc.h"
 
 // 画面の色
 const PixelColor kDesktopBGColor{45, 118, 237};
@@ -80,6 +80,22 @@ int printk(const char* format, ...) {
   return result;
 }
 
+usb::xhci::Controller* xhc;
+
+struct Message {
+  enum Type {
+    kInterruptXHCI,
+  } type;
+};
+
+ArrayQueue<Message>* main_queue;
+
+__attribute__((interrupt))
+void IntHandlerXHCI(InterruptFrame* frame) {
+  main_queue->Push(Message{Message::kInterruptXHCI});
+  NotifyEndOfInterrupt();
+}
+
 extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
   switch (frame_buffer_config.pixel_format) {
     case kPixelRGBResv8BitPerColor:
@@ -107,6 +123,10 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
   mouse_cursor = new(mouse_cursor_buf)MouseCursor {
     pixel_writer, kDesktopBGColor, {300, 200}
   };
+
+  std::array<Message, 32> main_queue_data;
+  ArrayQueue<Message> main_queue{main_queue_data};
+  ::main_queue = &main_queue;
 
   // picデバイスの列挙
   auto err = pci::ScanAllBus();
@@ -136,6 +156,17 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
     Log(kDebug, "xHc has not been found\n");
   }
 
+  const uint16_t cs = GetCS();
+  SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0), reinterpret_cast<uint64_t>(IntHandlerXHCI), cs);
+  LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
+
+  // read boot strap processor id
+  const uint8_t bsp_local_apic_id = *reinterpret_cast<uint32_t*>(0xfee00020) >> 24;
+  pci::ConfigureMSIFixedDestination(
+    *xhc_dev, bsp_local_apic_id,
+    pci::MSITriggerMode::kLevel, pci::MSIDeliveryMode::kFixed,
+    InterruptVector::kXHCI, 0);
+
   // BAR0レジスタ（= MMIOの位置)の読み取り
   const WithError<uint64_t> xhc_bar = pci::ReadBar(*xhc_dev, 0);
   Log(kDebug, "ReadBar: %s\n", xhc_bar.error.Name());
@@ -155,6 +186,9 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
   Log(kInfo, "xHC starting\n");
   xhc.Run();
 
+    ::xhc = &xhc;
+  __asm__("sti");
+
   usb::HIDMouseDriver::default_observer = MouseObserver;
 
   for (int i = 1; i <= xhc.MaxPorts(); ++i) {
@@ -169,13 +203,30 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
     }
   }
 
-  while(1) {
-    if (auto err = ProcessEvent(xhc)) {
-      Log(kError, "Error while ProcessEvent: %s at %s:%d\n", err.Name(), err.File(), err.Line());
+  while (true) {
+    __asm__("cli"); // clear interrupt flag, 割り込みをさせない
+    if (main_queue.Count() == 0) {
+      __asm__("sti\n\thlt"); // set interrupt flag, 割り込みが来るまでhalt
+      continue;
+    }
+
+    Message msg = main_queue.Front();
+    main_queue.Pop();
+    __asm__("sti");
+
+    switch (msg.type) {
+    case Message::kInterruptXHCI:
+      while (xhc.PrimaryEventRing()->HasFront()) {
+        if (auto err = ProcessEvent(xhc)) {
+          Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
+              err.Name(), err.File(), err.Line());
+        }
+      }
+      break;
+    default:
+      Log(kError, "Unknown message type: %d\n", msg.type);
     }
   }
-
-  while (1) __asm__("hlt");
 }
 
 extern "C" void __cxa_pure_virtual() {

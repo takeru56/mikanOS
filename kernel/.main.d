@@ -46,4 +46,5 @@ main.o: main.cpp \
   usb/classdriver/mouse.hpp usb/classdriver/hid.hpp \
   usb/classdriver/base.hpp usb/xhci/xhci.hpp usb/xhci/registers.hpp \
   register.hpp usb/xhci/context.hpp usb/xhci/ring.hpp usb/xhci/trb.hpp \
-  usb/xhci/port.hpp usb/xhci/devmgr.hpp usb/xhci/device.hpp
+  usb/xhci/port.hpp usb/xhci/devmgr.hpp usb/xhci/device.hpp \
+  interrupt.hpp asmfunc.h
