@@ -38,3 +38,53 @@ LoadIDT:
     mov rsp, rbp
     pop rbp
     ret
+
+extern kernel_main_stack
+extern KernelMainNewStack
+
+global KernelMain
+KernelMain:
+    mov rsp, kernel_main_stack + 1024 * 1024
+    call KernelMainNewStack
+.fin:
+    hlt
+    jmp .fin
+
+global LoadGDT
+LoadGDT:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 10
+    mov [rsp], di ; limit
+    mov [rsp + 2], rsi ; offset
+    lgdt [rsp] ; 10byteの領域（gdtの大きさと場所）を渡してGDT Registerに登録
+    mov rsp, rbp
+    pop rbp
+    ret
+
+global SetCSSS
+SetCSSS:
+    push rbp
+    mov rbp, rsp
+    mov ss, si
+    mov rax, .next
+    push rdi
+    push rax
+    o64 retf
+.next:
+    mov rsp, rbp
+    pop rbp
+    ret
+
+global SetDSALL
+SetDSALL:
+    mov ds, di
+    mov es, di
+    mov fs, di
+    mov gs, di
+    ret
+
+global SetCR3
+SetCR3:
+    mov cr3, rdi
+    ret

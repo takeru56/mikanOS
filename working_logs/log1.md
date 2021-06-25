@@ -59,3 +59,9 @@ $ x /fmt addr
 
 # day6
 PCIの詳細：http://archive.linux.or.jp/JF/JFdocs/The-Linux-Kernel-7.html
+
+# day8
+qemuを起動する際に
+> Unable to init server: Could not connect: Connection refused
+>QEMU 4.2.1 monitor - type 'help' for more information
+のエラーが出て画面が出力されない．

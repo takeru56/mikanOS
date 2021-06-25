@@ -12,3 +12,4 @@ class MouseCursor {
   PixelColor erase_color_;
   Vector2D<int> position_;
 };
+

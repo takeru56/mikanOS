@@ -10,6 +10,7 @@
 */
 
 #include "frame_buffer_config.hpp"
+#include "memory_map.hpp"
 #include "graphics.hpp"
 #include "mouse.hpp"
 #include "font.hpp"
@@ -17,6 +18,8 @@
 #include "pci.hpp"
 #include "logger.hpp"
 #include "queue.hpp"
+#include "segment.hpp"
+#include "paging.hpp"
 #include "usb/memory.hpp"
 #include "usb/device.hpp"
 #include "usb/classdriver/mouse.hpp"
@@ -24,10 +27,14 @@
 #include "usb/xhci/trb.hpp"
 #include "interrupt.hpp"
 #include "asmfunc.h"
+#include "memory_manager.hpp"
 
 // 画面の色
 const PixelColor kDesktopBGColor{45, 118, 237};
 const PixelColor kDesktopFGColor{255, 255, 255};
+
+char memory_manager_buf[sizeof(BitmapMemoryManager)];
+BitmapMemoryManager* memory_manager;
 
 char mouse_cursor_buf[sizeof(MouseCursor)];
 MouseCursor* mouse_cursor;
@@ -96,7 +103,12 @@ void IntHandlerXHCI(InterruptFrame* frame) {
   NotifyEndOfInterrupt();
 }
 
-extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
+alignas(16) uint8_t kernel_main_stack[1024 * 1024];
+
+extern "C" void KernelMainNewStack(const FrameBufferConfig& frame_buffer_config_ref, const MemoryMap& memory_map_ref) {
+  FrameBufferConfig frame_buffer_config{frame_buffer_config_ref};
+  MemoryMap memory_map{memory_map_ref};
+
   switch (frame_buffer_config.pixel_format) {
     case kPixelRGBResv8BitPerColor:
       pixel_writer = new(pixel_writer_buf) RGBResv8BitPerColorPixelWriter{frame_buffer_config};
@@ -117,8 +129,64 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 
   // 文字の出力
   console = new(console_buf) Console{*pixel_writer, {0, 0, 0}, {255, 255, 255}};
-  printk("Welcome to MikanOS\n");
+  printk("Welcome to MikanOS!\n");
   SetLogLevel(kWarn);
+
+  // gdtの設定
+  SetupSegments();
+  const uint16_t kernel_cs = 1 << 3;
+  const uint16_t kernel_ss = 2 << 3;
+  SetDSALL(0);
+  SetCSSS(kernel_cs, kernel_ss);
+  SetupIdentityPageTable();
+
+  // new() use a constructor to allocate heap area, but OS need to manage memory allocation.
+  // 配置new allocate memory area passed as an argument.
+  ::memory_manager = new(memory_manager_buf) BitmapMemoryManager;
+  const auto memory_map_base = reinterpret_cast<uintptr_t>(memory_map.buffer);
+  uintptr_t available_end = 0;
+
+  // memory managerの初期化
+  for (uintptr_t iter = memory_map_base;
+      memory_map_base < memory_map_base + memory_map.map_size;
+      iter += memory_map.descriptor_size) {
+
+    auto desc = reinterpret_cast<const MemoryDescriptor*>(iter);
+    // 歯抜けになっている部分を塗りつぶす
+    if (available_end < desc->physical_start) {
+      memory_manager->MarkAllocated(
+        FrameID{available_end / kBytesPerFrame},
+        (desc->physical_start - available_end) / kBytesPerFrame);
+    }
+
+    const auto physical_end = desc->physical_start + desc->number_of_pages * kUEFIPageSize;
+    if (IsAvailable(static_cast<MemoryType>(desc->type))) {
+      available_end = physical_end;
+    } else {
+      // 使用中になっている部分を塗りつぶす
+      memory_manager->MarkAllocated(
+        FrameID{desc->physical_start / kBytesPerFrame},
+        desc->number_of_pages * kUEFIPageSize / kBytesPerFrame);
+    }
+  }
+  memory_manager->SetMemoryRange(FrameID{1}, FrameID{available_end / kBytesPerFrame});
+
+  // TODO: ここから
+
+  // memory map
+  // printk("memory_map: %p\n", &memory_map);
+  // for (uintptr_t iter = reinterpret_cast<uintptr_t>(memory_map.buffer);
+  //     iter < reinterpret_cast<uintptr_t>(memory_map.buffer) + memory_map.map_size;
+  //     iter += memory_map.descriptor_size) {
+  //   auto desc = reinterpret_cast<MemoryDescriptor*>(iter);
+  //   if (IsAvailable(static_cast<MemoryType>(desc->type))) {
+  //       printk("type = %u, phys = %08lx - %08lx, pages  = %lu, attr = %08lx\n",
+  //         desc->type,
+  //         desc->physical_start + desc->number_of_pages * 4096 - 1,
+  //         desc->number_of_pages,
+  //         desc->attribute);
+  //   }
+  // }
 
   mouse_cursor = new(mouse_cursor_buf)MouseCursor {
     pixel_writer, kDesktopBGColor, {300, 200}
@@ -156,8 +224,7 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
     Log(kDebug, "xHc has not been found\n");
   }
 
-  const uint16_t cs = GetCS();
-  SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0), reinterpret_cast<uint64_t>(IntHandlerXHCI), cs);
+  SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0), reinterpret_cast<uint64_t>(IntHandlerXHCI), kernel_cs);
   LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
 
   // read boot strap processor id

@@ -9,6 +9,7 @@
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
 #include  <Guid/FileInfo.h>
+#include "memory_map.hpp"
 #include "frame_buffer_config.hpp"
 #include "elf.hpp"
 
@@ -19,15 +20,6 @@
 // 役割
 // メモリ上の状態を確認
 // カーネルをディスク上から呼び出してメモリ上に展開して実行
-
-struct MemoryMap {
-    UINTN buffer_size;
-    VOID* buffer;
-    UINTN map_size;
-    UINTN map_key;
-    UINTN descriptor_size;
-    UINT32 descriptor_version;
-};
 
 EFI_STATUS GetMemoryMap(struct MemoryMap* map)
 {
@@ -221,11 +213,23 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     OpenRootDir(image_handle, &root_dir);
 
     EFI_FILE_PROTOCOL* memmap_file;
-    root_dir->Open(root_dir, &memmap_file, L"\\memmap", EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    status = root_dir->Open(root_dir, &memmap_file, L"\\memmap", EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
 
-    // memmapをcsv形式でファイルに書き出す
-    SaveMemoryMap(&memmap, memmap_file);
-    memmap_file->Close(memmap_file);
+    if (EFI_ERROR(status)) {
+        Print(L"failed to open file '\\memmap': %r\n", status);
+        Print(L"Ignored.\n");
+    } else {
+        status = SaveMemoryMap(&memmap, memmap_file);
+        if (EFI_ERROR(status)) {
+        Print(L"failed to save memory map: %r\n", status);
+        Halt();
+        }
+        status = memmap_file->Close(memmap_file);
+        if (EFI_ERROR(status)) {
+        Print(L"failed to close memory map: %r\n", status);
+        Halt();
+        }
+  }
 
     // *** 画面を塗りつぶす ***
     EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
@@ -350,10 +354,10 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     }
 
     // 関数の先頭アドレスと引数の型，返り値の型を組み合わせて，任意の場所から命令を実行できる
-    typedef void EntryPointType(const struct FrameBufferConfig*);
+    typedef void EntryPointType(const struct FrameBufferConfig*, const struct MemoryMap*);
     EntryPointType* entry_point = (EntryPointType*)entry_addr;
     // 実行
-    entry_point(&config);
+    entry_point(&config, &memmap);
     while(1);
     return EFI_SUCCESS;
 }
