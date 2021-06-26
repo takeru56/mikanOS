@@ -148,7 +148,7 @@ extern "C" void KernelMainNewStack(const FrameBufferConfig& frame_buffer_config_
 
   // memory managerの初期化
   for (uintptr_t iter = memory_map_base;
-      memory_map_base < memory_map_base + memory_map.map_size;
+      iter < memory_map_base + memory_map.map_size;
       iter += memory_map.descriptor_size) {
 
     auto desc = reinterpret_cast<const MemoryDescriptor*>(iter);

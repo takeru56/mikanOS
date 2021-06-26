@@ -65,3 +65,4 @@ qemuを起動する際に
 > Unable to init server: Could not connect: Connection refused
 >QEMU 4.2.1 monitor - type 'help' for more information
 のエラーが出て画面が出力されない．
+=> なんかよくわからんけどwsl2を再起動したら直った．
